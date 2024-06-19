@@ -6,6 +6,7 @@ import torch
 sys.path.append("../")
 
 from pcdet.models.model_utils import model_nms_utils
+from pcdet.ops.iou3d_nms.iou3d_nms_utils import paired_boxes_iou3d_gpu
 from kitti_format_to_openpcdet_format import dip_KittiDataset
 """
 Peform Weighted Box Fusion between multipled prediction to ensemble the predictions.
@@ -33,16 +34,16 @@ def pair_wise_3d_iou_matrix(boxes):
     for i in range(N):
         for j in range(i + 1, N):
             # TODO: find the IoU function here
-            iou = IoU(boxes[i], boxes[j])
+            iou = paired_boxes_iou3d_gpu(torch.unsqueeze(boxes[i], 0), torch.unsqueeze(boxes[j], 0)) # Unsqueeze to have tensors of shape 1,7 as input to the function
             iou_matrix[i, j] = iou
             iou_matrix[j, i] = iou  # IoU is symmetric
 
     return iou_matrix
 
-def perform_weighted_fusion(
-    prediction_files_paths, calibration_file_path, frame_ids=None, output_path=None, iou_threshold=0.55
-):
 
+def perform_weighted_fusion(
+    prediction_files_paths, calibration_file_path, frame_ids=None, output_path=None, iou_threshold=0.5
+):
     kitti_class = dip_KittiDataset()
     # Calibration file
     calib = kitti_class.get_calib_from_full_path(Path(calibration_file_path))
@@ -81,11 +82,15 @@ def perform_weighted_fusion(
         # TODO: this is highly inneficient, but ok bc actually very few bbox per image (as
         # TODO: ensemble is done post-nms)
         # Compute the NxN IoU matrix (pair-wise IoU)
-        iou_matrix = pair_wise_3d_iou_matrix(box_preds)
+        # Shape N,N, where diagonal are ones.
+        iou_matrix: np.ndarray = pair_wise_3d_iou_matrix(box_preds)
+
         N = box_preds.shape[0]
         visited = [False] * N
         clusters = []
-
+        # Cluster outputs the indices of the bounding boxes corresponding to the same clusters
+        # Clusters is a list of len K, where K is the nbr of clusters.
+        # Each element of the list is another list, that contains the indices corresponding to this cluster
         for i in range(N):
             if not visited[i]:
                 # Start a new cluster
@@ -103,16 +108,83 @@ def perform_weighted_fusion(
                             cluster.append(j)
 
                 clusters.append(cluster)
-        # Cluster outputs the indices of the bounding boxes corresponding to the same cluste
+
+        final_boxes = []
+        final_scores = []
+        final_labels = []
+        for cluster in clusters:
+            # #!
+            # if len(cluster) < 2:
+            #     continue
+            # #!
+            # print('-----------------------')
+            # print('Clusters: ', cluster)
+            # Use the index_select function to extract rows based on the indices
+            cluster_tensor = torch.tensor(cluster).cuda()
+            selected_scores = torch.index_select(cls_score_preds, 0, cluster_tensor) # Selected Scores
+            selected_labels = torch.index_select(classes_idx_preds, 0, cluster_tensor) # Selected Labels
+            selected_bboxs = torch.index_select(box_preds, 0, cluster_tensor) # Selected Labels
+            # print('--- Selected Boxes for this cluster', selected_bboxs)
+            # print('--- Selected Scores for this cluster', selected_scores)
+            # print('--- Selected Labels for this cluster', selected_labels)
+            ### Average the bbox
+            # Compute the weighted average of bounding boxes based on scores
+            # DIP -  I got inspired from https://www.kaggle.com/competitions/3d-object-detection-for-autonomous-vehicles/discussion/122820
+            #! #! We cannot directly do the avg of the angle because the angle is modulo 2 pis!!
+            sin_values = torch.sin(2 * selected_bboxs[:, 6])
+            cos_values = torch.cos(2 * selected_bboxs[:, 6])
+
+            s = torch.sum(selected_scores * sin_values) / torch.sum(selected_scores)
+            c = torch.sum(selected_scores * cos_values) / torch.sum(selected_scores)
+            mean_angle = torch.atan2(s, c).unsqueeze(0) / 2
+
+            weighted_avg_box_coords = torch.sum(selected_bboxs[:,:6] * selected_scores.view(-1, 1), dim=0) / torch.sum(selected_scores)
+
+            # print('mean angle shape', mean_angle)
+            # print('mean weighted avg box', weighted_avg_box_coords.shape)
+
+            weighted_avg_box = torch.cat((weighted_avg_box_coords, mean_angle))
 
 
-        # Pick new bboox of each cluster
+            # Reshape the weighted average box to have shape (1, 7)
+            weighted_avg_box = weighted_avg_box.unsqueeze(0)
 
-        # Pick the new confidence score of each cluster
+            ### Take most present labels
+            # todo - big assumption for now, we assume all the boxes in a cluster have the same labels
+            box_label = selected_labels[0]
 
-        # Pick the label of each cluster
-        # TODO: Maybe we should compute the cluster per class to make sure we have the same label in a cluster?
-        pass
+
+            ### Compute the new conf score based on the formula of the paper
+            box_score = torch.mean(selected_scores)
+            T = len(cluster) # nbr of bbox predicted in this cluser
+            ensemble_n = len(prediction_files_paths) # nbr of models taken from the ensemble
+            box_score = box_score * min(T,ensemble_n) / ensemble_n
+
+            # Append
+            final_boxes.append(weighted_avg_box)
+            final_scores.append(box_score)
+            final_labels.append(box_label)
+            # print('Final Values for this cluster: ')
+            # print('bbox: ', weighted_avg_box)
+            # print('Score', box_score)
+            # print('Label', box_label)
+
+        final_boxes_tensor = torch.cat(final_boxes, dim=0)
+        final_scores_tensor = torch.stack(final_scores)
+        final_labels_tensor = torch.stack(final_labels)
+
+        record_dict = {
+            "pred_boxes": final_boxes_tensor,
+            "pred_scores": final_scores_tensor,
+            "pred_labels": final_labels_tensor,
+        }
+        # Convert back to KITTI format
+        kitti_class = kitti_class.convert_OpenPCDet_to_kitti_format(
+            pred_dicts=[record_dict],
+            calib=calib,
+            frame_ids=frame_ids,
+            output_path=output_path,
+        )
     else:
         # todo DIP -> this only works with batch_size 1
         # Create an empty text file
@@ -136,11 +208,12 @@ if __name__ == "__main__":
 
     # TODO: most of the code is based on code that can do the calculation by batch -> could be optimized by doing it by batch
     # Iterate through each folder
-    for file_name in os.listdir(model_predictions_2):
+    for file_name in os.listdir(model_predictions_1):
         # if os.path.isfile(os.path.join(model_predictions_1, file_name)):
         #     print(file_name)
         #     exit()
         print("Doing filename", file_name)
+
         prediction_files_paths = [
             os.path.join(model_predictions_1, file_name),
             os.path.join(model_predictions_2, file_name),
