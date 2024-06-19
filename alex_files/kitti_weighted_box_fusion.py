@@ -3,11 +3,13 @@ from pathlib import Path
 import sys
 import numpy as np
 import torch
+
 sys.path.append("../")
 
 from pcdet.models.model_utils import model_nms_utils
 from pcdet.ops.iou3d_nms.iou3d_nms_utils import paired_boxes_iou3d_gpu
 from kitti_format_to_openpcdet_format import dip_KittiDataset
+
 """
 Peform Weighted Box Fusion between multipled prediction to ensemble the predictions.
 We implemented to work in this context - far from optimal implementation
@@ -34,7 +36,9 @@ def pair_wise_3d_iou_matrix(boxes):
     for i in range(N):
         for j in range(i + 1, N):
             # TODO: find the IoU function here
-            iou = paired_boxes_iou3d_gpu(torch.unsqueeze(boxes[i], 0), torch.unsqueeze(boxes[j], 0)) # Unsqueeze to have tensors of shape 1,7 as input to the function
+            iou = paired_boxes_iou3d_gpu(
+                torch.unsqueeze(boxes[i], 0), torch.unsqueeze(boxes[j], 0)
+            )  # Unsqueeze to have tensors of shape 1,7 as input to the function
             iou_matrix[i, j] = iou
             iou_matrix[j, i] = iou  # IoU is symmetric
 
@@ -42,7 +46,11 @@ def pair_wise_3d_iou_matrix(boxes):
 
 
 def perform_weighted_fusion(
-    prediction_files_paths, calibration_file_path, frame_ids=None, output_path=None, iou_threshold=0.5
+    prediction_files_paths,
+    calibration_file_path,
+    frame_ids=None,
+    output_path=None,
+    iou_threshold=0.5,
 ):
     kitti_class = dip_KittiDataset()
     # Calibration file
@@ -121,9 +129,15 @@ def perform_weighted_fusion(
             # print('Clusters: ', cluster)
             # Use the index_select function to extract rows based on the indices
             cluster_tensor = torch.tensor(cluster).cuda()
-            selected_scores = torch.index_select(cls_score_preds, 0, cluster_tensor) # Selected Scores
-            selected_labels = torch.index_select(classes_idx_preds, 0, cluster_tensor) # Selected Labels
-            selected_bboxs = torch.index_select(box_preds, 0, cluster_tensor) # Selected Labels
+            selected_scores = torch.index_select(
+                cls_score_preds, 0, cluster_tensor
+            )  # Selected Scores
+            selected_labels = torch.index_select(
+                classes_idx_preds, 0, cluster_tensor
+            )  # Selected Labels
+            selected_bboxs = torch.index_select(
+                box_preds, 0, cluster_tensor
+            )  # Selected Labels
             # print('--- Selected Boxes for this cluster', selected_bboxs)
             # print('--- Selected Scores for this cluster', selected_scores)
             # print('--- Selected Labels for this cluster', selected_labels)
@@ -138,13 +152,14 @@ def perform_weighted_fusion(
             c = torch.sum(selected_scores * cos_values) / torch.sum(selected_scores)
             mean_angle = torch.atan2(s, c).unsqueeze(0) / 2
 
-            weighted_avg_box_coords = torch.sum(selected_bboxs[:,:6] * selected_scores.view(-1, 1), dim=0) / torch.sum(selected_scores)
+            weighted_avg_box_coords = torch.sum(
+                selected_bboxs[:, :6] * selected_scores.view(-1, 1), dim=0
+            ) / torch.sum(selected_scores)
 
             # print('mean angle shape', mean_angle)
             # print('mean weighted avg box', weighted_avg_box_coords.shape)
 
             weighted_avg_box = torch.cat((weighted_avg_box_coords, mean_angle))
-
 
             # Reshape the weighted average box to have shape (1, 7)
             weighted_avg_box = weighted_avg_box.unsqueeze(0)
@@ -153,12 +168,13 @@ def perform_weighted_fusion(
             # todo - big assumption for now, we assume all the boxes in a cluster have the same labels
             box_label = selected_labels[0]
 
-
             ### Compute the new conf score based on the formula of the paper
             box_score = torch.mean(selected_scores)
-            T = len(cluster) # nbr of bbox predicted in this cluser
-            ensemble_n = len(prediction_files_paths) # nbr of models taken from the ensemble
-            box_score = box_score * min(T,ensemble_n) / ensemble_n
+            T = len(cluster)  # nbr of bbox predicted in this cluser
+            ensemble_n = len(
+                prediction_files_paths
+            )  # nbr of models taken from the ensemble
+            box_score = box_score * min(T, ensemble_n) / ensemble_n
 
             # Append
             final_boxes.append(weighted_avg_box)
