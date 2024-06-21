@@ -155,7 +155,7 @@ def perform_weighted_fusion(
                 if nbr_models_predictions < ensemble_n / 2:
                     # We have less than half of the models predicting this bbox, we discard it
                     continue
-            elif selection_strategy == "unanymous":
+            elif selection_strategy == "unanimous":
                 if nbr_models_predictions < ensemble_n:
                     # Not all models predicted this bbox, we discard it
                     continue
