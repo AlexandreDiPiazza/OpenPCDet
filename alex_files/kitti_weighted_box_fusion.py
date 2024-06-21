@@ -59,7 +59,7 @@ def perform_weighted_fusion(
         - Compute the weighted average of the bounding boxes based on the scores
 
 
-    Based on https://github.com/ancasag/ensembleObjectDetection , we allow 3 different startegies:
+    For the Selection strategy, based on https://github.com/ancasag/ensembleObjectDetection , we allow 3 different startegies:
         - affirmative: the box is kept if it is present in at least one of the models
         - consensus: the box is kept if it is present in the majority of the models
         - unanimous: the box is kept if it is present in all the models
@@ -212,22 +212,27 @@ def perform_weighted_fusion(
             # print('Score', box_score)
             # print('Label', box_label)
 
-        final_boxes_tensor = torch.cat(final_boxes, dim=0)
-        final_scores_tensor = torch.stack(final_scores)
-        final_labels_tensor = torch.stack(final_labels)
+        if len(final_boxes) == 0:
+            # After the selection strategy, we might have no boxes left
+            # Create an empty text file
+            open(output_path / ("%s.txt" % frame_ids[0]), "w").close()
+        else:
+            final_boxes_tensor = torch.cat(final_boxes, dim=0)
+            final_scores_tensor = torch.stack(final_scores)
+            final_labels_tensor = torch.stack(final_labels)
 
-        record_dict = {
-            "pred_boxes": final_boxes_tensor,
-            "pred_scores": final_scores_tensor,
-            "pred_labels": final_labels_tensor,
-        }
-        # Convert back to KITTI format
-        kitti_class = kitti_class.convert_OpenPCDet_to_kitti_format(
-            pred_dicts=[record_dict],
-            calib=calib,
-            frame_ids=frame_ids,
-            output_path=output_path,
-        )
+            record_dict = {
+                "pred_boxes": final_boxes_tensor,
+                "pred_scores": final_scores_tensor,
+                "pred_labels": final_labels_tensor,
+            }
+            # Convert back to KITTI format
+            kitti_class = kitti_class.convert_OpenPCDet_to_kitti_format(
+                pred_dicts=[record_dict],
+                calib=calib,
+                frame_ids=frame_ids,
+                output_path=output_path,
+            )
     else:
         # todo DIP -> this only works with batch_size 1
         # Create an empty text file
@@ -264,7 +269,7 @@ if __name__ == "__main__":
         ]
         calibration_file_path = os.path.join(kitti_calib_path, file_name)
 
-        after_nms_labels = perform_weighted_fusion(
+        perform_weighted_fusion(
             prediction_files_paths,
             calibration_file_path,
             frame_ids=[file_name.rstrip(".txt")],
