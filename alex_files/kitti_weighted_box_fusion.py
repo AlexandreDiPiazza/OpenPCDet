@@ -46,12 +46,39 @@ def pair_wise_3d_iou_matrix(boxes):
 
 
 def perform_weighted_fusion(
-    prediction_files_paths,
-    calibration_file_path,
-    frame_ids=None,
-    output_path=None,
-    iou_threshold=0.5,
+    prediction_files_paths: list,
+    calibration_file_path: list,
+    frame_ids: list = None,
+    output_path: Path = None,
+    iou_threshold: float = 0.5,
+    selection_strategy: str = "affirmative",
 ):
+    """
+    Pefroms the weighted fusion algorithm:
+        - Regroup the bounding boxes that have a high IoU
+        - Compute the weighted average of the bounding boxes based on the scores
+
+
+    Based on https://github.com/ancasag/ensembleObjectDetection , we allow 3 different startegies:
+        - affirmative: the box is kept if it is present in at least one of the models
+        - consensus: the box is kept if it is present in the majority of the models
+        - unanimous: the box is kept if it is present in all the models
+
+    Args:
+        - selection_strategy: float, the threshold to consider two boxes as the same
+        - selectrion_stragegy: str, the strategy to select the boxes. Can be 'affirmative', 'consensus' or 'unanimous'
+    Returns:
+    """
+    assert selection_strategy in [
+        "affirmative",
+        "consensus",
+        "unanimous",
+    ], "The selection strategy must be one of 'affirmative', 'consensus' or 'unanimous'"
+
+
+
+    ensemble_n = len(prediction_files_paths)  # nbr of models taken from the ensemble
+
     kitti_class = dip_KittiDataset()
     # Calibration file
     calib = kitti_class.get_calib_from_full_path(Path(calibration_file_path))
@@ -93,13 +120,13 @@ def perform_weighted_fusion(
         # Shape N,N, where diagonal are ones.
         iou_matrix: np.ndarray = pair_wise_3d_iou_matrix(box_preds)
 
-        N = box_preds.shape[0]
-        visited = [False] * N
+        nbr_bbox_predicted = box_preds.shape[0]
+        visited = [False] * nbr_bbox_predicted
         clusters = []
         # Cluster outputs the indices of the bounding boxes corresponding to the same clusters
         # Clusters is a list of len K, where K is the nbr of clusters.
         # Each element of the list is another list, that contains the indices corresponding to this cluster
-        for i in range(N):
+        for i in range(nbr_bbox_predicted):
             if not visited[i]:
                 # Start a new cluster
                 cluster = [i]
@@ -109,7 +136,7 @@ def perform_weighted_fusion(
 
                 while stack:
                     current = stack.pop()
-                    for j in range(N):
+                    for j in range(nbr_bbox_predicted):
                         if not visited[j] and iou_matrix[current, j] > iou_threshold:
                             visited[j] = True
                             stack.append(j)
@@ -121,12 +148,17 @@ def perform_weighted_fusion(
         final_scores = []
         final_labels = []
         for cluster in clusters:
-            # #!
-            # if len(cluster) < 2:
-            #     continue
-            # #!
-            # print('-----------------------')
-            # print('Clusters: ', cluster)
+            # TODO: Based on the IoU threshold, it might be possible that a cluster has multiple bb of the same model
+            # TODO: , in that case, it doenst  make sense to compute the nbr of models as the length of the cluster
+            nbr_models_predictions = len(cluster)
+            if selection_strategy == "consensus":
+                if nbr_models_predictions < ensemble_n / 2:
+                    # We have less than half of the models predicting this bbox, we discard it
+                    continue
+            elif selection_strategy == "unanymous":
+                if nbr_models_predictions < ensemble_n:
+                    # Not all models predicted this bbox, we discard it
+                    continue
             # Use the index_select function to extract rows based on the indices
             cluster_tensor = torch.tensor(cluster).cuda()
             selected_scores = torch.index_select(
@@ -138,9 +170,6 @@ def perform_weighted_fusion(
             selected_bboxs = torch.index_select(
                 box_preds, 0, cluster_tensor
             )  # Selected Labels
-            # print('--- Selected Boxes for this cluster', selected_bboxs)
-            # print('--- Selected Scores for this cluster', selected_scores)
-            # print('--- Selected Labels for this cluster', selected_labels)
             ### Average the bbox
             # Compute the weighted average of bounding boxes based on scores
             # DIP -  I got inspired from https://www.kaggle.com/competitions/3d-object-detection-for-autonomous-vehicles/discussion/122820
@@ -171,9 +200,7 @@ def perform_weighted_fusion(
             ### Compute the new conf score based on the formula of the paper
             box_score = torch.mean(selected_scores)
             T = len(cluster)  # nbr of bbox predicted in this cluser
-            ensemble_n = len(
-                prediction_files_paths
-            )  # nbr of models taken from the ensemble
+
             box_score = box_score * min(T, ensemble_n) / ensemble_n
 
             # Append
