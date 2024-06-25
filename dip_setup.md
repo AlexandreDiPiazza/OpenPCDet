@@ -210,3 +210,25 @@ AttributeError: 'NoneType' object has no attribute 'point_size'
 Couldnt figure out how to make it work
 It is because there is no display attached, due to : "[Open3D WARNING] GLFW Error: X11: The DISPLAY environment variable is missing
 [Open3D WARNING] Failed to initialize GLFW".
+
+### setuptools
+If you run into the error: 
+
+```
+from pkg_resources import packaging  # type: ignore[attr-defined]
+ImportError: cannot import name 'packaging' from 'pkg_resources' (/opt/conda/envs/openpcdet/lib/python3.8/site-packages/pkg_resources/__init__.py)
+```
+Install this specific verions of setuptools.
+```
+pip install setuptools==69.5.1
+```
+
+### Unsolved error:
+On some machine, after running `python setup.py develop` I get the error: 
+```
+cflags + _get_cuda_arch_flags(cflags))
+File "/opt/conda/envs/openpcdet/lib/python3.8/site-packages/torch/utils/cpp_extension.py", line 1562, in _get_cuda_arch_flags
+arch_list[-1] += '+PTX'
+IndexError: list index out of range
+```
+I dont know how to solve it rn.
