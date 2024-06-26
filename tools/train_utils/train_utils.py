@@ -7,13 +7,65 @@ import glob
 from torch.nn.utils import clip_grad_norm_
 from pcdet.utils import common_utils, commu_utils
 
-from grokfast import gradfilter_ma, gradfilter_ema
+#from grokfast import gradfilter_ma, gradfilter_ema
+
+### Imports
+from collections import deque
+from typing import Dict, Optional, Literal
+import torch.nn as nn
+
+
+### Grokfast
+def gradfilter_ema(
+    m: nn.Module,
+    grads: Optional[Dict[str, torch.Tensor]] = None,
+    alpha: float = 0.99,
+    lamb: float = 5.0,
+) -> Dict[str, torch.Tensor]:
+    if grads is None:
+        grads = {n: p.grad.data.detach() for n, p in m.named_parameters() if p.requires_grad}
+
+    for n, p in m.named_parameters():
+        if p.requires_grad:
+            grads[n] = grads[n] * alpha + p.grad.data.detach() * (1 - alpha)
+            p.grad.data = p.grad.data + grads[n] * lamb
+
+    return grads
+
+
+### Grokfast-MA
+def gradfilter_ma(
+    m: nn.Module,
+    grads: Optional[Dict[str, deque]] = None,
+    window_size: int = 128,
+    lamb: float = 5.0,
+    filter_type: Literal['mean', 'sum'] = 'mean',
+    warmup: bool = True,
+    trigger: bool = False,
+) -> Dict[str, deque]:
+    if grads is None:
+        grads = {n: deque(maxlen=window_size) for n, p in m.named_parameters() if p.requires_grad}
+
+    for n, p in m.named_parameters():
+        if p.requires_grad:
+            grads[n].append(p.grad.data.detach())
+
+            if not warmup or len(grads[n]) == window_size and not trigger:
+                if filter_type == "mean":
+                    avg = sum(grads[n]) / len(grads[n])
+                elif filter_type == "sum":
+                    avg = sum(grads[n])
+                else:
+                    raise ValueError(f"Unrecognized filter_type {filter_type}")
+                p.grad.data = p.grad.data + avg * lamb
+
+    return grads
 
 def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, accumulated_iter, optim_cfg,
                     rank, tbar, total_it_each_epoch, dataloader_iter, tb_log=None, leave_pbar=False,
                     use_logger_to_record=False, logger=None, logger_iter_interval=50, cur_epoch=None,
                     total_epochs=None, ckpt_save_dir=None, ckpt_save_time_interval=300, show_gpu_stat=False, use_amp=False,
-                    grokfast_grads=None):
+                    train_with_grokfast=False, grokfast_grads=None):
     if total_it_each_epoch == len(train_loader):
         dataloader_iter = iter(train_loader)
     ckpt_save_cnt = 1
@@ -60,8 +112,8 @@ def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, ac
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
         clip_grad_norm_(model.parameters(), optim_cfg.GRAD_NORM_CLIP)
-        if grokfast_grads is not None:
-            grokfast_grads = gradfilter_ema(model, grads=grokfast_grads, alpha=0.2, lamb=0.005)
+        if train_with_grokfast is True:
+            grokfast_grads = gradfilter_ema(model, grads=grokfast_grads, alpha= 0.9, lamb=2.0)
         scaler.step(optimizer)
         scaler.update()
 
@@ -223,7 +275,8 @@ def train_model(model, optimizer, train_loader, model_func, lr_scheduler, optim_
                     ckpt_save_dir=ckpt_save_dir, ckpt_save_time_interval=ckpt_save_time_interval,
                     show_gpu_stat=show_gpu_stat,
                     use_amp=use_amp,
-                    grokfast_grads=grokfast_grads,
+                    train_with_grokfast=True,
+                    grokfast_grads=grokfast_grads
                 )
 
             # save trained model
